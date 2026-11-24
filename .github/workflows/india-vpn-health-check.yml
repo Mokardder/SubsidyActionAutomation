@@ -1,0 +1,109 @@
+
+name: India VPN Health Check
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs daily at 08:53 AM India time (03:23 UTC)
+    - cron: "23 3 * * *"
+
+jobs:
+  check-india-vpn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Install OpenVPN
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn curl
+
+      - name: Create VPN configuration
+        env:
+          OVPN_CONFIG: ${{ secrets.INDIA_OVPN_CONFIG }}
+        run: |
+          if [ -z "$OVPN_CONFIG" ]; then
+            echo "Missing INDIA_OVPN_CONFIG secret"
+            exit 1
+          fi
+
+          printf '%s\n' "$OVPN_CONFIG" > "$RUNNER_TEMP/india.ovpn"
+          chmod 600 "$RUNNER_TEMP/india.ovpn"
+
+      - name: Create VPN credentials
+        env:
+          VPN_USERNAME: ${{ secrets.VPN_USERNAME }}
+          VPN_PASSWORD: ${{ secrets.VPN_PASSWORD }}
+        run: |
+          if [ -z "$VPN_USERNAME" ] || [ -z "$VPN_PASSWORD" ]; then
+            echo "Missing VPN_USERNAME or VPN_PASSWORD secret"
+            exit 1
+          fi
+
+          printf '%s\n%s\n' "$VPN_USERNAME" "$VPN_PASSWORD" \
+            > "$RUNNER_TEMP/vpn-auth.txt"
+          chmod 600 "$RUNNER_TEMP/vpn-auth.txt"
+
+      - name: Connect to Indian VPN
+        run: |
+          sudo openvpn \
+            --config "$RUNNER_TEMP/india.ovpn" \
+            --auth-user-pass "$RUNNER_TEMP/vpn-auth.txt" \
+            --auth-nocache \
+            --daemon \
+            --writepid "$RUNNER_TEMP/openvpn.pid" \
+            --log "$RUNNER_TEMP/openvpn.log"
+
+          for i in $(seq 1 30); do
+            if grep -q "Initialization Sequence Completed" \
+              "$RUNNER_TEMP/openvpn.log"; then
+              echo "VPN connected successfully"
+              exit 0
+            fi
+
+            if grep -q "AUTH_FAILED" "$RUNNER_TEMP/openvpn.log"; then
+              echo "VPN authentication failed"
+              cat "$RUNNER_TEMP/openvpn.log"
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          echo "VPN connection timed out"
+          cat "$RUNNER_TEMP/openvpn.log"
+          exit 1
+
+      - name: Verify Indian IP address
+        run: |
+          echo "Checking public IP..."
+
+          RESPONSE=$(curl -fsS --max-time 20 https://api.country.is/)
+          echo "$RESPONSE"
+
+          COUNTRY=$(echo "$RESPONSE" | \
+            python3 -c "import json,sys; print(json.load(sys.stdin).get('country',''))")
+
+          if [ "$COUNTRY" != "IN" ]; then
+            echo "ERROR: VPN IP is not Indian. Country: $COUNTRY"
+            exit 1
+          fi
+
+          echo "SUCCESS: Indian VPN is working"
+
+      - name: Show VPN logs on failure
+        if: failure()
+        run: |
+          if [ -f "$RUNNER_TEMP/openvpn.log" ]; then
+            sudo cat "$RUNNER_TEMP/openvpn.log"
+          fi
+
+      - name: Disconnect VPN and clean up
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/openvpn.pid" ]; then
+            sudo kill "$(cat "$RUNNER_TEMP/openvpn.pid")" || true
+          fi
+
+          sudo rm -f "$RUNNER_TEMP/india.ovpn" \
+            "$RUNNER_TEMP/vpn-auth.txt"
