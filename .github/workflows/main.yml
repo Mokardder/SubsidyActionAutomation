@@ -1,0 +1,62 @@
+
+name: Indian VPN Connection Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  connect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Install OpenVPN
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn curl
+
+      - name: Prepare VPN
+        env:
+          CONFIG: ${{ secrets.INDIA_OVPN_CONFIG }}
+          USERNAME: ${{ secrets.VPN_USERNAME }}
+          PASSWORD: ${{ secrets.VPN_PASSWORD }}
+        run: |
+          printf '%s' "$CONFIG" > india.ovpn
+          printf '%s\n' "$USERNAME" "$PASSWORD" > auth.txt
+          chmod 600 india.ovpn auth.txt
+
+      - name: Connect VPN
+        run: |
+          sudo openvpn \
+            --config india.ovpn \
+            --auth-user-pass auth.txt \
+            --data-ciphers AES-128-CBC \
+            --data-ciphers-fallback AES-128-CBC \
+            --daemon \
+            --log /tmp/vpn.log
+
+          for i in $(seq 1 40); do
+            if curl -fsS --max-time 5 \
+              https://api.country.is/ > ip.json; then
+
+              if grep -q '"country":"IN"' ip.json; then
+                echo "Indian IP verified!"
+                cat ip.json
+                exit 0
+              fi
+            fi
+            sleep 3
+          done
+
+          sudo cat /tmp/vpn.log
+          exit 1
+
+      - name: Test website access
+        run: |
+          curl -L -I --max-time 30 https://example.com
+
+      - name: Disconnect VPN
+        if: always()
+        run: |
+          sudo pkill openvpn || true
+          rm -f india.ovpn auth.txt
